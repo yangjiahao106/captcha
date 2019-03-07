@@ -5,7 +5,6 @@
 package captcha
 
 import (
-	"container/list"
 	"sync"
 	"time"
 )
@@ -29,31 +28,27 @@ type Store interface {
 // expValue stores timestamp and id of captchas. It is used in the list inside
 // memoryStore for indexing generated captchas by timestamp to enable garbage
 // collection of expired captchas.
-type idByTimeValue struct {
-	timestamp time.Time
-	id        string
-}
 
 // memoryStore is an internal store for captcha ids and their values.
 type memoryStore struct {
 	sync.RWMutex
 	digitsById map[string][]byte
-	idByTime   *list.List
+	timeById map[string]int64
 	// Number of items stored since last collection.
 	numStored int
 	// Number of saved items that triggers collection.
 	collectNum int
 	// Expiration time of captchas.
-	expiration time.Duration
+	expiration int64
 }
 
 // NewMemoryStore returns a new standard memory store for captchas with the
 // given collection threshold and expiration time (duration). The returned
 // store must be registered with SetCustomStore to replace the default one.
-func NewMemoryStore(collectNum int, expiration time.Duration) Store {
+func NewMemoryStore(collectNum int, expiration int64) Store {
 	s := new(memoryStore)
 	s.digitsById = make(map[string][]byte)
-	s.idByTime = list.New()
+	s.timeById = make(map[string]int64)
 	s.collectNum = collectNum
 	s.expiration = expiration
 	return s
@@ -62,7 +57,7 @@ func NewMemoryStore(collectNum int, expiration time.Duration) Store {
 func (s *memoryStore) Set(id string, digits []byte) {
 	s.Lock()
 	s.digitsById[id] = digits
-	s.idByTime.PushBack(idByTimeValue{time.Now(), id})
+	s.timeById[id] = time.Now().Unix()
 	s.numStored++
 	if s.numStored <= s.collectNum {
 		s.Unlock()
@@ -81,13 +76,27 @@ func (s *memoryStore) Get(id string, clear bool) (digits []byte) {
 		s.Lock()
 		defer s.Unlock()
 	}
+
 	digits, ok := s.digitsById[id]
 	if !ok {
 		return
 	}
+	t, ok := s.timeById[id]
+	if !ok {
+		return []byte{}
+	} else {
+		if t+s.expiration < time.Now().Unix() {
+			delete(s.digitsById, id)
+			delete(s.timeById, id)
+			return []byte{}
+		}
+	}
+
 	if clear {
 		delete(s.digitsById, id)
-		// XXX(dchest) Index (s.idByTime) will be cleaned when
+		delete(s.timeById, id)
+
+		// XXX(dchest) Index (s.timeById) will be cleaned when
 		// collecting expired captchas.  Can't clean it here, because
 		// we don't store reference to expValue in the map.
 		// Maybe store it?
@@ -95,23 +104,17 @@ func (s *memoryStore) Get(id string, clear bool) (digits []byte) {
 	return
 }
 
+// garbage collection
 func (s *memoryStore) collect() {
-	now := time.Now()
+	now := time.Now().Unix()
 	s.Lock()
 	defer s.Unlock()
 	s.numStored = 0
-	for e := s.idByTime.Front(); e != nil; {
-		ev, ok := e.Value.(idByTimeValue)
-		if !ok {
-			return
-		}
-		if ev.timestamp.Add(s.expiration).Before(now) {
-			delete(s.digitsById, ev.id)
-			next := e.Next()
-			s.idByTime.Remove(e)
-			e = next
-		} else {
-			return
+
+	for k, v := range s.timeById {
+		if v+s.expiration < now {
+			delete(s.digitsById, k)
+			delete(s.timeById, k)
 		}
 	}
 }
